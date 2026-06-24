@@ -9,10 +9,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from my_app.app.projects.exceptions import ProjectNotFoundError
+from my_app.app.projects.exceptions import ProjectNotFoundException
 from my_app.app.projects.schemas import ProjectCreate, ProjectRead
-from my_app.app.projects.service import ProjectService
-from my_app.dependencies import get_project_service
+from my_app.app.projects.service import ProjectService, get_project_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -32,38 +31,67 @@ async def get_project(
 ) -> ProjectRead:
     try:
         return await service.get_project(project_id)
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except ProjectNotFoundException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
 ```
 
 ## Dependency Wiring
 
+Place the shared session provider in the database module:
+
 ```python
 from collections.abc import AsyncIterator
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
+
+from my_app.config.settings import settings
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+engine = create_async_engine(settings.postgresql_url, pool_pre_ping=True)
+async_session_factory = async_sessionmaker(
+    engine, expire_on_commit=False, autoflush=True
+)
+
+
+async def get_async_session() -> AsyncIterator[AsyncSession]:
+    async with async_session_factory() as session:
+        yield session
+```
+
+Place the repository provider in the feature repository module:
+
+```python
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from my_app.app.projects.repository import ProjectRepository
-from my_app.app.projects.service import ProjectService
-from my_app.database.postgresql import async_session_factory
-
-
-async def get_session() -> AsyncIterator[AsyncSession]:
-    async with async_session_factory() as session:
-        yield session
+from my_app.database.postgresql import get_async_session
 
 
 async def get_project_repository(
-    session: AsyncSession = Depends(get_session),
-) -> ProjectRepository:
+    session: AsyncSession = Depends(get_async_session),
+) -> "ProjectRepository":
     return ProjectRepository(session)
+```
+
+Place the service provider in the feature service module:
+
+```python
+from fastapi import Depends
+
+from my_app.app.projects.repository import ProjectRepository, get_project_repository
 
 
 async def get_project_service(
-    repository: ProjectRepository = Depends(get_project_repository),
-) -> ProjectService:
-    return ProjectService(repository)
+    project_repository: ProjectRepository = Depends(get_project_repository),
+) -> "ProjectService":
+    return ProjectService(project_repository)
 ```
 
 ## Database Session
@@ -81,7 +109,7 @@ class Base(DeclarativeBase):
 
 engine = create_async_engine(settings.postgresql_url, pool_pre_ping=True)
 async_session_factory = async_sessionmaker(
-    engine, expire_on_commit=False, autoflush=False
+    engine, expire_on_commit=False, autoflush=True
 )
 ```
 

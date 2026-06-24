@@ -88,7 +88,7 @@ class ProjectRepository:
 ```python
 from uuid import UUID
 
-from my_app.app.projects.exceptions import ProjectNotFoundError
+from my_app.app.projects.exceptions import ProjectNotFoundException
 from my_app.app.projects.repository import ProjectRepository
 from my_app.app.projects.schemas import ProjectCreate, ProjectRead
 
@@ -104,6 +104,6 @@ class ProjectService:
     async def get_project(self, project_id: UUID) -> ProjectRead:
         project_db = await self._repository.get_by_id(project_id)
         if project_db is None:
-            raise ProjectNotFoundError(f"Project {project_id} not found")
+            raise ProjectNotFoundException(f"Project {project_id} not found")
         return ProjectRead.model_validate(project_db)
 ```

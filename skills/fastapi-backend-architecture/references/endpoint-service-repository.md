@@ -6,7 +6,7 @@ Use these patterns to decide where code belongs:
 Endpoint
   - HTTP routing, path/query/body parameters, status codes, response models
   - FastAPI dependencies such as auth, pagination, request context, and DI
-  - Translation from domain exceptions to HTTP errors when no global handler exists
+  - Translation from domain exceptions to HTTP errors
 
 Service
   - Business workflow and policy
@@ -20,6 +20,49 @@ Repository
   - Filtering, pagination, locking, eager loading, and aggregate queries
   - Returns ORM objects or persistence-oriented values, not HTTP responses
 ```
+
+## Dependency Providers
+
+Prefer feature-local provider functions. Put the repository provider in `repository.py`, the service provider in `service.py`, and inject only the service from endpoints. Shared resources such as database sessions remain in infrastructure modules.
+
+```python
+# repository.py
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from my_app.database.postgresql import get_async_session
+
+
+async def get_project_repository(
+    session: AsyncSession = Depends(get_async_session),
+) -> "ProjectRepository":
+    return ProjectRepository(session)
+
+
+class ProjectRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+```
+
+```python
+# service.py
+from fastapi import Depends
+
+from my_app.app.projects.repository import ProjectRepository, get_project_repository
+
+
+async def get_project_service(
+    project_repository: ProjectRepository = Depends(get_project_repository),
+) -> "ProjectService":
+    return ProjectService(project_repository)
+
+
+class ProjectService:
+    def __init__(self, project_repository: ProjectRepository) -> None:
+        self.project_repository = project_repository
+```
+
+For a synchronous SQLAlchemy project, use the same provider shape with `Session` and a sync repository/service body.
 
 ## Pattern: Simple Create
 
@@ -38,7 +81,7 @@ async def create_project(
 # service.py
 async def create_project(self, project: ProjectCreate) -> ProjectRead:
     if await self._repository.exists_by_name(project.name):
-        raise ProjectAlreadyExistsError(project.name)
+        raise ProjectAlreadyExistsException(project.name)
     project_db = await self._repository.create(project)
     return ProjectRead.model_validate(project_db)
 
@@ -54,7 +97,7 @@ async def create(self, project: ProjectCreate) -> ProjectDB:
 
 ## Pattern: Read By ID With 404
 
-Keep the not-found rule in the service. The endpoint translates it only if the app does not have a global exception handler.
+Keep the not-found rule in the service. The endpoint translates it to `HTTPException` at the HTTP boundary.
 
 ```python
 # endpoints.py
@@ -65,15 +108,17 @@ async def get_project(
 ) -> ProjectRead:
     try:
         return await service.get_project(project_id)
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except ProjectNotFoundException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
 
 
 # service.py
 async def get_project(self, project_id: UUID) -> ProjectRead:
     project_db = await self._repository.get_by_id(project_id)
     if project_db is None:
-        raise ProjectNotFoundError(f"Project {project_id} not found")
+        raise ProjectNotFoundException(f"Project {project_id} not found")
     return ProjectRead.model_validate(project_db)
 
 
@@ -143,7 +188,7 @@ async def archive_project(
 async def archive_project(self, project_id: UUID) -> ProjectRead:
     project = await self._repository.get_by_id(project_id)
     if project is None:
-        raise ProjectNotFoundError(f"Project {project_id} not found")
+        raise ProjectNotFoundException(f"Project {project_id} not found")
     if project.status == ProjectStatus.ARCHIVED:
         return ProjectRead.model_validate(project)
 
@@ -164,7 +209,7 @@ async def transfer_project(self, project_id: UUID, new_owner_id: UUID) -> Projec
     async with self._unit_of_work:
         project = await self._project_repository.get_by_id(project_id)
         if project is None:
-            raise ProjectNotFoundError(f"Project {project_id} not found")
+            raise ProjectNotFoundException(f"Project {project_id} not found")
         await self._user_repository.require_exists(new_owner_id)
         project.owner_id = new_owner_id
         await self._project_repository.save(project, commit=False)
